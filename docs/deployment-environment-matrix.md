@@ -157,3 +157,22 @@ The Vercel Root Directory is set to the repository root instead of `client/`. Up
 
 **Governance page shows wrong contract.**
 `VITE_CONTRACT_ID` or `VITE_VAULT_CONTRACT_ID` is set to a testnet ID in a production deployment. Update to the correct mainnet contract ID.
+
+---
+
+## Keeping This Document in Sync
+
+This document, [README.md](../README.md#vercel-deployment-settings), and the committed [`vercel.json`](../vercel.json) must all describe the same Vercel project. A snapshot test enforces that:
+
+```bash
+node scripts/verify-deployment-environment-matrix.js
+```
+
+Run it locally after touching any of the following, and fix whichever side is now wrong — the script prints a documented-vs-committed diff for every mismatch and exits non-zero if anything drifted:
+
+- **Install / Build / Output Command** — must match `vercel.json` exactly, in both this document's *Vercel Project Settings* table and README's *Vercel Deployment Settings* table. `vercel.json` is the source of truth for these three fields; update the docs to match it, not the other way around.
+- **Root Directory** — not stored in `vercel.json` (Vercel has no repo-relative "root directory" key in that file); it is a Vercel dashboard setting. The script instead verifies the documented directory (`client`) exists and defines a `build` script, and that the *repository root* still has no `build` script — that gap is exactly the failure mode this table warns about, and the check keeps the warning honest.
+- **Node.js Version** — cross-checked against `node-version` in the `frontend` job of [`.github/workflows/ci.yml`](../.github/workflows/ci.yml). Keep them in lockstep so CI and Vercel build with the same Node runtime.
+- **`VITE_*` variable names** — every variable referenced anywhere in this document must also appear in [`client/.env.example`](../client/.env.example) or [docs/frontend-env-reference.md](./frontend-env-reference.md). Renaming or removing a variable from either of those without updating this document will fail the check.
+
+Run this check whenever you change `vercel.json`, this document, or README's Vercel table — it is not currently wired into CI, so it will not catch drift automatically until it is run.
