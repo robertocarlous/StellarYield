@@ -201,7 +201,7 @@ Pull requests that touch `contracts/` must pass the checklist in [docs/contract-
 
 ## CI Failure Artifacts, Logs, and Fuzzing
 
-Failed workflow runs may publish downloadable artifacts such as frontend test/build logs or contract test output. Open the run in the Actions tab and scroll to Artifacts, or follow [How to interpret failed logs](./docs/contributor-guide.md#how-to-interpret-failed-logs) in the contributor guide.
+Failed workflow runs may publish downloadable artifacts such as client (frontend), server (backend), keeper, rewards, and contract test/build logs. The **Backend**, **Frontend**, **Contracts**, **Keeper Bot**, and **Rewards Service** jobs also post a markdown job summary on failure — with the first matching failure lines and a direct artifact link — visible in the run's **Summary** tab, so you often don't need to open the raw log at all. Open the run in the Actions tab and scroll to Artifacts (or check the **Summary** tab first), or follow [How to interpret failed logs](./docs/contributor-guide.md#how-to-interpret-failed-logs) in the contributor guide.
 
 ### Running the Fuzzing Suite
 

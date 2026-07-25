@@ -10,9 +10,11 @@ The table below reflects **`continue-on-error`**, conditional `if:` steps, and j
 
 | Area | Workflow / source | Blocks PR in YAML? | Notes |
 |------|-------------------|---------------------|-------|
-| **Backend** | `ci.yml` → *Backend Checks* | **Usually yes** | `npm test`, `prisma generate`, and `prisma db push` fail the job. Backend **lint** uses `continue-on-error: true` (advisory only in CI). |
-| **Frontend** | `ci.yml` → *Frontend Checks* | **Partially** | **Tests** failing fail the job. **Lint** (`lint:ci-scope`) and **build** use `continue-on-error: true` (advisory in CI). Prefer running full `npm run lint` and `npm run build` locally before pushing. |
-| **Contracts** | `ci.yml` → *Soroban Contract Checks* | **No** | Entire job sets `continue-on-error: true`. Formatting (`cargo fmt`) still runs without that flag on the step—treat contract hygiene as **required by policy** even when the job is lenient. |
+| **Backend** | `ci.yml` → *Backend Checks* | **Usually yes** | `npm test`, `prisma generate`, and `prisma db push` fail the job. Backend **lint** uses `continue-on-error: true` (advisory only in CI). On test failure, `backend-test.log` is uploaded as an artifact and summarized in the job's **Summary** tab. |
+| **Frontend** | `ci.yml` → *Frontend Checks* | **Partially** | **Tests** failing fail the job. **Lint** (`lint:ci-scope`) and **build** use `continue-on-error: true` (advisory in CI). Prefer running full `npm run lint` and `npm run build` locally before pushing. On test/build failure, logs are uploaded and summarized in the job's **Summary** tab. |
+| **Contracts** | `ci.yml` → *Soroban Contract Checks* | **No** | Entire job sets `continue-on-error: true`. Formatting (`cargo fmt`) still runs without that flag on the step—treat contract hygiene as **required by policy** even when the job is lenient. Test and fuzz logs are uploaded and summarized on failure. |
+| **Keeper Bot** | `ci.yml` → *Keeper Bot Checks* | **No** | Job-level `continue-on-error: true`. Runs `backend/keepers` Jest suite. Failure log is uploaded and summarized in the job's **Summary** tab. |
+| **Rewards Service** | `ci.yml` → *Rewards Service Checks* | **No** | Job-level `continue-on-error: true`. Runs `backend/rewards` Jest suite. Failure log is uploaded and summarized in the job's **Summary** tab. |
 | **Docs / README** | `ci.yml` → *README Command Verification* | **No** | Job-level `continue-on-error: true`. |
 | **Security (Rust)** | `security.yml` | **Mixed** | Jobs post **PR comments** (`cargo-audit`, security-focused Clippy, Soroban pattern scan). Explicit **fail-on-push** guards exist for some steps; PRs rely on visibility in comments rather than failing the audit job by default—still fix reported issues. |
 | **CodeQL** | `codeql.yml` | **If required** | Fails when analysis fails unless overridden. Typically treated as blocking when enabled for the repo. Hard to replicate fully offline. |
@@ -50,7 +52,7 @@ npx prisma db push
 npm test
 ```
 
-**Reading failures:** Expand **Backend Checks → Run backend tests** (or Prisma steps) in the Actions log. Database connection errors usually mean `DATABASE_URL` or Postgres availability differs from CI.
+**Reading failures:** Expand **Backend Checks → Run backend tests** (or Prisma steps) in the Actions log. Database connection errors usually mean `DATABASE_URL` or Postgres availability differs from CI. If `npm test` fails, check the **Summary** tab for a job summary with the first matching failure lines and a link to the `backend-failure-logs-*` artifact containing the full `backend-test.log`.
 
 ---
 
@@ -68,7 +70,39 @@ npm run test
 npm run build
 ```
 
-**Reading failures:** On failure, the workflow may upload **Artifacts** (e.g. `frontend-failure-artifacts-*`) containing `frontend-test.log` and `frontend-build.log`. Open the run summary → **Artifacts** at the bottom of the page.
+**Reading failures:** On failure, the workflow may upload **Artifacts** (e.g. `frontend-failure-artifacts-*`) containing `frontend-test.log` and `frontend-build.log`. Open the run summary → **Artifacts** at the bottom of the page, or check the **Summary** tab for a job summary with the first matching failure lines and a direct artifact link.
+
+---
+
+## Keeper Bot (`ci.yml` — Keeper Bot Checks)
+
+**What it does:** Installs `backend/keepers/` dependencies and runs its Jest suite (`npm test`). The job is advisory (`continue-on-error: true` at the job level) but still fails its own status if tests fail, so treat red as a real regression in keeper logic (liquidations, compounding, queue health).
+
+**Local parity:**
+
+```bash
+cd backend/keepers
+npm ci --no-audit --prefer-offline
+npm test
+```
+
+**Reading failures:** On test failure, `keeper-test.log` is uploaded as `keeper-failure-logs-*` and summarized in the job's **Summary** tab with the first matching failure lines and a direct artifact link.
+
+---
+
+## Rewards Service (`ci.yml` — Rewards Service Checks)
+
+**What it does:** Installs `backend/rewards/` dependencies and runs its Jest suite (`npm test`), covering Merkle tree generation and proof size limits for `$YIELD` distributions. The job is advisory (`continue-on-error: true` at the job level) but still fails its own status if tests fail.
+
+**Local parity:**
+
+```bash
+cd backend/rewards
+npm ci --no-audit --prefer-offline
+npm test
+```
+
+**Reading failures:** On test failure, `rewards-test.log` is uploaded as `rewards-failure-logs-*` and summarized in the job's **Summary** tab with the first matching failure lines and a direct artifact link.
 
 ---
 
@@ -313,10 +347,11 @@ If the name differs in your fork, run `gh workflow list` and use the **CI** work
 ## How to interpret failed logs
 
 1. Open **Actions** → failed workflow → failed **job**.
-2. Expand the first **red** step; read from the **first error** upward (later steps are often cascades).
-3. Download **Artifacts** when the job summary lists them (frontend logs, contract logs, audit JSON).
-4. For **security comment** workflows, read the **issue comment** on the PR for a summary table, then cross-check the uploaded artifact for full detail.
-5. For **Vercel**, open the deployment in the Vercel dashboard and read the **Build** log; search for `error` / `ELIFECYCLE`.
+2. Check the **Summary** tab first: the **Backend**, **Frontend**, **Contracts**, **Keeper Bot**, and **Rewards Service** jobs each post a per-job markdown summary (`scripts/ci-summarize-failure.sh`) listing the first ~20 matching failure lines (`FAIL`, `✕`, `error[...]`, `panicked at`, `test result: FAILED`, etc.) plus a direct link to the full log artifact — this is usually enough to triage without opening the raw step output.
+3. If the summary doesn't have enough detail, expand the first **red** step in the job log; read from the **first error** upward (later steps are often cascades).
+4. Download the full **Artifacts** for the raw logs (`backend-failure-logs-*`, `frontend-failure-artifacts-*`, `contract-test-logs-*` / `contract-fuzz-logs-*`, `keeper-failure-logs-*`, `rewards-failure-logs-*`).
+5. For **security comment** workflows, read the **issue comment** on the PR for a summary table, then cross-check the uploaded artifact for full detail.
+6. For **Vercel**, open the deployment in the Vercel dashboard and read the **Build** log; search for `error` / `ELIFECYCLE`.
 
 ---
 

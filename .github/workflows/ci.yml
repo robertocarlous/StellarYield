@@ -104,7 +104,36 @@ jobs:
         run: npx prisma migrate status || (echo "Unapplied schema changes detected" && exit 1)
 
       - name: Run backend tests
-        run: npm test
+        id: backend_tests
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          npm test 2>&1 | tee backend-test.log
+
+      - name: Upload backend failure log
+        id: upload_backend_log
+        if: steps.backend_tests.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-failure-logs-${{ github.run_id }}
+          path: server/backend-test.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Summarize backend failure
+        if: steps.backend_tests.outcome == 'failure'
+        working-directory: ${{ github.workspace }}
+        shell: bash
+        run: |
+          scripts/ci-summarize-failure.sh "Backend Checks" \
+            "backend-failure-logs-${{ github.run_id }}" \
+            "${{ steps.upload_backend_log.outputs.artifact-url }}" \
+            server/backend-test.log
+
+      - name: Fail backend job if tests failed
+        if: steps.backend_tests.outcome == 'failure'
+        run: exit 1
 
   frontend:
     name: Frontend Checks
@@ -154,6 +183,7 @@ jobs:
           npm run build 2>&1 | tee frontend-build.log
 
       - name: Upload frontend failure artifacts
+        id: upload_frontend_artifacts
         if: steps.frontend_tests.outcome == 'failure' || steps.frontend_build.outcome == 'failure'
         uses: actions/upload-artifact@v4
         with:
@@ -164,6 +194,16 @@ jobs:
             client/dist
           if-no-files-found: ignore
           retention-days: 7
+
+      - name: Summarize frontend failure
+        if: steps.frontend_tests.outcome == 'failure' || steps.frontend_build.outcome == 'failure'
+        working-directory: ${{ github.workspace }}
+        shell: bash
+        run: |
+          scripts/ci-summarize-failure.sh "Frontend Checks" \
+            "frontend-failure-artifacts-${{ github.run_id }}" \
+            "${{ steps.upload_frontend_artifacts.outputs.artifact-url }}" \
+            client/frontend-test.log client/frontend-build.log
 
       - name: Fail frontend job if tests failed
         if: steps.frontend_tests.outcome == 'failure'
@@ -209,6 +249,7 @@ jobs:
           cargo test --test fuzz --lib 2>&1 | tee contract-fuzz.log
 
       - name: Upload contract test logs
+        id: upload_contract_test_logs
         if: steps.contract_tests.outcome == 'failure'
         uses: actions/upload-artifact@v4
         with:
@@ -216,6 +257,34 @@ jobs:
           path: contracts/contract-test.log
           if-no-files-found: error
           retention-days: 7
+
+      - name: Upload contract fuzz logs
+        id: upload_contract_fuzz_logs
+        if: steps.contract_fuzz.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: contract-fuzz-logs-${{ github.run_id }}
+          path: contracts/contract-fuzz.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Summarize contracts failure
+        if: steps.contract_tests.outcome == 'failure' || steps.contract_fuzz.outcome == 'failure'
+        working-directory: ${{ github.workspace }}
+        shell: bash
+        run: |
+          if [ "${{ steps.contract_tests.outcome }}" = "failure" ]; then
+            scripts/ci-summarize-failure.sh "Soroban Contract Checks — tests" \
+              "contract-test-logs-${{ github.run_id }}" \
+              "${{ steps.upload_contract_test_logs.outputs.artifact-url }}" \
+              contracts/contract-test.log
+          fi
+          if [ "${{ steps.contract_fuzz.outcome }}" = "failure" ]; then
+            scripts/ci-summarize-failure.sh "Soroban Contract Checks — fuzz" \
+              "contract-fuzz-logs-${{ github.run_id }}" \
+              "${{ steps.upload_contract_fuzz_logs.outputs.artifact-url }}" \
+              contracts/contract-fuzz.log
+          fi
 
       - name: Fail contracts job if tests failed
         if: steps.contract_tests.outcome == 'failure'
@@ -246,6 +315,112 @@ jobs:
           else
             echo "No deployment manifest found — skipping verification"
           fi
+
+  keeper:
+    name: Keeper Bot Checks
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    defaults:
+      run:
+        working-directory: backend/keepers
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: backend/keepers/package-lock.json
+
+      - name: Install keeper dependencies
+        run: npm ci --no-audit --prefer-offline
+
+      - name: Run keeper tests
+        id: keeper_tests
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          npm test 2>&1 | tee keeper-test.log
+
+      - name: Upload keeper failure log
+        id: upload_keeper_log
+        if: steps.keeper_tests.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: keeper-failure-logs-${{ github.run_id }}
+          path: backend/keepers/keeper-test.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Summarize keeper failure
+        if: steps.keeper_tests.outcome == 'failure'
+        working-directory: ${{ github.workspace }}
+        shell: bash
+        run: |
+          scripts/ci-summarize-failure.sh "Keeper Bot Checks" \
+            "keeper-failure-logs-${{ github.run_id }}" \
+            "${{ steps.upload_keeper_log.outputs.artifact-url }}" \
+            backend/keepers/keeper-test.log
+
+      - name: Fail keeper job if tests failed
+        if: steps.keeper_tests.outcome == 'failure'
+        run: exit 1
+
+  rewards:
+    name: Rewards Service Checks
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    defaults:
+      run:
+        working-directory: backend/rewards
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: backend/rewards/package-lock.json
+
+      - name: Install rewards dependencies
+        run: npm ci --no-audit --prefer-offline
+
+      - name: Run rewards tests
+        id: rewards_tests
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          npm test 2>&1 | tee rewards-test.log
+
+      - name: Upload rewards failure log
+        id: upload_rewards_log
+        if: steps.rewards_tests.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: rewards-failure-logs-${{ github.run_id }}
+          path: backend/rewards/rewards-test.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Summarize rewards failure
+        if: steps.rewards_tests.outcome == 'failure'
+        working-directory: ${{ github.workspace }}
+        shell: bash
+        run: |
+          scripts/ci-summarize-failure.sh "Rewards Service Checks" \
+            "rewards-failure-logs-${{ github.run_id }}" \
+            "${{ steps.upload_rewards_log.outputs.artifact-url }}" \
+            backend/rewards/rewards-test.log
+
+      - name: Fail rewards job if tests failed
+        if: steps.rewards_tests.outcome == 'failure'
+        run: exit 1
 
   readme-commands:
     name: README Command Verification
