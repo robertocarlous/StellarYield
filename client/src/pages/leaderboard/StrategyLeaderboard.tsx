@@ -2,10 +2,16 @@ import React, { useEffect, useState } from "react";
 import { Trophy, Medal, TrendingUp, Filter, AlertCircle, RefreshCw, BarChart3, RotateCcw } from "lucide-react";
 import { apiUrl } from "../../lib/api";
 import { ConfidenceBadge } from "../../components/AIAdvisor/ConfidenceBadge";
+import { StatusBadge, type StatusVariant } from "../../components/StatusBadge";
 import {
   useLeaderboardFilters,
+  sortStrategiesForView,
+  getFreshnessStatus,
   TIME_WINDOWS,
   STRATEGY_TYPES,
+  SORT_VIEWS,
+  type FreshnessStatus,
+  type SortView,
 } from "../../hooks/useLeaderboardFilters";
 
 interface RankedStrategy {
@@ -18,6 +24,40 @@ interface RankedStrategy {
   riskScore: number;
   riskAdjustedYield: number;
   drawdownProxy: number;
+  /** ISO timestamp of the last confirmed data refresh for this strategy, if known. */
+  lastUpdatedAt?: string | null;
+}
+
+const SORT_VIEW_LABELS: Record<SortView, string> = {
+  ray: "RAY",
+  apy: "APY",
+  risk: "Risk",
+};
+
+const FRESHNESS_BADGE: Record<FreshnessStatus, { label: string; variant: StatusVariant }> = {
+  fresh: { label: "Live", variant: "success" },
+  stale: { label: "Stale", variant: "warning" },
+  missing: { label: "No Data", variant: "neutral" },
+};
+
+function formatFreshnessTimestamp(lastUpdatedAt?: string | null): string | null {
+  if (!lastUpdatedAt) return null;
+  const date = new Date(lastUpdatedAt);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toLocaleString();
+}
+
+function freshnessTooltip(status: FreshnessStatus, lastUpdatedAt?: string | null): string {
+  if (status === "missing") {
+    return "No freshness data available for this strategy — treat its ranking with caution.";
+  }
+  const formatted = formatFreshnessTimestamp(lastUpdatedAt);
+  if (status === "stale") {
+    return formatted
+      ? `Data last refreshed ${formatted} — may not reflect current market conditions.`
+      : "Data is stale — may not reflect current market conditions.";
+  }
+  return formatted ? `Data last refreshed ${formatted}.` : "Data is up to date.";
 }
 
 interface LeaderboardResponse {
@@ -35,8 +75,10 @@ const StrategyLeaderboard: React.FC = () => {
   const {
     timeWindow,
     strategyType,
+    sortView,
     setTimeWindow,
     setStrategyType,
+    setSortView,
     resetFilters,
     isDefault,
   } = useLeaderboardFilters();
@@ -106,6 +148,10 @@ const StrategyLeaderboard: React.FC = () => {
     rotationData?.decisions?.find((d) => d.action === "rotate") ??
     rotationData?.decisions?.[0];
 
+  // Fresh data always outranks stale/missing data, regardless of its APY or
+  // risk score — see sortStrategiesForView in useLeaderboardFilters.
+  const sortedItems = sortStrategiesForView(data?.items ?? [], sortView);
+
   return (
     <div className="space-y-8 max-w-5xl mx-auto">
       <div className="text-center space-y-2">
@@ -158,6 +204,22 @@ const StrategyLeaderboard: React.FC = () => {
             </button>
           ))}
         </div>
+        <div className="flex gap-2 items-center">
+          <label className="text-xs text-gray-400 uppercase tracking-widest">Sort by</label>
+          {SORT_VIEWS.map((view) => (
+            <button
+              key={view}
+              onClick={() => setSortView(view)}
+              className={`px-3 py-1 rounded-lg text-xs font-semibold uppercase tracking-wider transition-colors ${
+                sortView === view
+                  ? "bg-teal-500 text-white"
+                  : "bg-white/5 text-gray-400 hover:bg-white/10"
+              }`}
+            >
+              {SORT_VIEW_LABELS[view]}
+            </button>
+          ))}
+        </div>
         {!isDefault && (
           <button
             onClick={resetFilters}
@@ -190,7 +252,7 @@ const StrategyLeaderboard: React.FC = () => {
             Retry
           </button>
         </div>
-      ) : (data?.items ?? []).length === 0 ? (
+      ) : sortedItems.length === 0 ? (
         <div className="glass-panel p-12 flex flex-col items-center justify-center space-y-4">
           <BarChart3 className="text-gray-500" size={64} />
           <div className="text-center space-y-2">
@@ -208,6 +270,7 @@ const StrategyLeaderboard: React.FC = () => {
                 <th className="px-6 py-4">Rank</th>
                 <th className="px-6 py-4">Strategy</th>
                 <th className="px-6 py-4">Type</th>
+                <th className="px-6 py-4">Freshness</th>
                 <th className="px-6 py-4">APY</th>
                 <th className="px-6 py-4">Risk Score</th>
                 <th className="px-6 py-4">
@@ -219,21 +282,34 @@ const StrategyLeaderboard: React.FC = () => {
               </tr>
             </thead>
             <tbody className="divide-y divide-white/5">
-              {(data?.items ?? []).map((s) => (
+              {sortedItems.map((s, index) => {
+                const displayRank = index + 1;
+                const freshnessStatus = getFreshnessStatus(s.lastUpdatedAt);
+                const freshnessBadge = FRESHNESS_BADGE[freshnessStatus];
+                return (
                 <tr
                   key={s.id}
-                  className={`hover:bg-white/5 transition-colors ${s.rank <= 3 ? "bg-indigo-500/5" : ""}`}
+                  className={`hover:bg-white/5 transition-colors ${displayRank <= 3 ? "bg-indigo-500/5" : ""}`}
                 >
                   <td className="px-6 py-4 font-mono text-lg flex items-center gap-2">
-                    {s.rank === 1 && <Medal className="text-yellow-400" size={18} />}
-                    {s.rank === 2 && <Medal className="text-gray-300" size={18} />}
-                    {s.rank === 3 && <Medal className="text-orange-400" size={18} />}
-                    #{s.rank}
+                    {displayRank === 1 && <Medal className="text-yellow-400" size={18} />}
+                    {displayRank === 2 && <Medal className="text-gray-300" size={18} />}
+                    {displayRank === 3 && <Medal className="text-orange-400" size={18} />}
+                    #{displayRank}
                   </td>
                   <td className="px-6 py-4 font-semibold text-white">{s.name}</td>
                   <td className="px-6 py-4">
                     <span className="px-2 py-0.5 rounded bg-white/10 text-gray-300 text-xs uppercase">
                       {s.strategyType}
+                    </span>
+                  </td>
+                  <td className="px-6 py-4">
+                    <span title={freshnessTooltip(freshnessStatus, s.lastUpdatedAt)}>
+                      <StatusBadge
+                        variant={freshnessBadge.variant}
+                        label={freshnessBadge.label}
+                        compact
+                      />
                     </span>
                   </td>
                   <td className="px-6 py-4 text-green-400 font-bold">{s.apy.toFixed(2)}%</td>
@@ -257,7 +333,8 @@ const StrategyLeaderboard: React.FC = () => {
                     ${s.tvlUsd.toLocaleString()}
                   </td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         </div>

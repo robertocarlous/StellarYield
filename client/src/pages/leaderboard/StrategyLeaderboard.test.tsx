@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import StrategyLeaderboard from "./StrategyLeaderboard";
+import { getFreshnessStatus, sortStrategiesForView } from "../../hooks/useLeaderboardFilters";
 
 // Mock the API module
 vi.mock("../../lib/api", () => ({
@@ -609,6 +610,289 @@ describe("StrategyLeaderboard", () => {
         expect(fetchMock).toHaveBeenCalledWith(
           expect.stringContaining("/api/strategies/rotation"),
         );
+      });
+    });
+  });
+
+  describe("Freshness metadata", () => {
+    const FRESH_TIMESTAMP = new Date(Date.now() - 5 * 60 * 1000).toISOString(); // 5 min ago
+    const STALE_TIMESTAMP = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(); // 3h ago
+
+    describe("getFreshnessStatus (pure logic)", () => {
+      it("treats a recent timestamp as fresh", () => {
+        expect(getFreshnessStatus(FRESH_TIMESTAMP)).toBe("fresh");
+      });
+
+      it("treats a timestamp older than the stale threshold as stale", () => {
+        expect(getFreshnessStatus(STALE_TIMESTAMP)).toBe("stale");
+      });
+
+      it("treats a missing timestamp as missing", () => {
+        expect(getFreshnessStatus(null)).toBe("missing");
+        expect(getFreshnessStatus(undefined)).toBe("missing");
+      });
+
+      it("treats an unparsable timestamp as missing", () => {
+        expect(getFreshnessStatus("not-a-date")).toBe("missing");
+      });
+    });
+
+    describe("sortStrategiesForView (pure logic)", () => {
+      const fresh = {
+        id: "fresh-strategy",
+        apy: 5,
+        riskScore: 5,
+        riskAdjustedYield: 5,
+        lastUpdatedAt: FRESH_TIMESTAMP,
+      };
+      const stale = {
+        id: "stale-strategy",
+        apy: 50,
+        riskScore: 9,
+        riskAdjustedYield: 50,
+        lastUpdatedAt: STALE_TIMESTAMP,
+      };
+      const missing = {
+        id: "missing-strategy",
+        apy: 100,
+        riskScore: 10,
+        riskAdjustedYield: 100,
+        lastUpdatedAt: null,
+      };
+
+      it("never ranks stale data above fresh data in the APY view, even with a higher APY", () => {
+        const sorted = sortStrategiesForView([stale, fresh], "apy");
+        expect(sorted.map((s) => s.id)).toEqual(["fresh-strategy", "stale-strategy"]);
+      });
+
+      it("never ranks stale data above fresh data in the risk view, even with a higher risk score", () => {
+        const sorted = sortStrategiesForView([stale, fresh], "risk");
+        expect(sorted.map((s) => s.id)).toEqual(["fresh-strategy", "stale-strategy"]);
+      });
+
+      it("ranks missing data below stale data regardless of metric", () => {
+        const sorted = sortStrategiesForView([missing, stale], "apy");
+        expect(sorted.map((s) => s.id)).toEqual(["stale-strategy", "missing-strategy"]);
+      });
+
+      it("orders rows within the same freshness tier by the selected metric, descending", () => {
+        const freshLow = { ...fresh, id: "fresh-low", apy: 1 };
+        const freshHigh = { ...fresh, id: "fresh-high", apy: 9 };
+        const sorted = sortStrategiesForView([freshLow, freshHigh], "apy");
+        expect(sorted.map((s) => s.id)).toEqual(["fresh-high", "fresh-low"]);
+      });
+    });
+
+    describe("Rendering freshness badges", () => {
+      const freshnessMockData = {
+        items: [
+          {
+            rank: 1,
+            id: "fresh-strategy",
+            name: "Fresh Strategy",
+            strategyType: "blend",
+            apy: 6,
+            tvlUsd: 100000,
+            riskScore: 6,
+            riskAdjustedYield: 0.6,
+            drawdownProxy: 0.01,
+            lastUpdatedAt: FRESH_TIMESTAMP,
+          },
+          {
+            rank: 2,
+            id: "stale-strategy",
+            name: "Stale Strategy",
+            strategyType: "soroswap",
+            apy: 20,
+            tvlUsd: 200000,
+            riskScore: 8,
+            riskAdjustedYield: 2.0,
+            drawdownProxy: 0.03,
+            lastUpdatedAt: STALE_TIMESTAMP,
+          },
+          {
+            rank: 3,
+            id: "missing-strategy",
+            name: "Missing Freshness Strategy",
+            strategyType: "defindex",
+            apy: 30,
+            tvlUsd: 50000,
+            riskScore: 9,
+            riskAdjustedYield: 3.0,
+            drawdownProxy: 0.02,
+            lastUpdatedAt: null,
+          },
+        ],
+        filters: { timeWindow: "all", strategyType: "all" },
+        total: 3,
+        scoringMethodology: "RAY = APY / (1 + risk_penalty)",
+      };
+
+      function mockFetchWith(leaderboardData: unknown) {
+        (global.fetch as ReturnType<typeof vi.fn>).mockImplementation((url) => {
+          if (url.includes("/api/strategies/leaderboard")) {
+            return Promise.resolve({
+              ok: true,
+              json: async () => leaderboardData,
+            } as Response);
+          }
+          return Promise.resolve({
+            ok: true,
+            json: async () => mockRotationData,
+          } as Response);
+        });
+      }
+
+      it("shows a Live badge for fresh strategy data", async () => {
+        mockFetchWith(freshnessMockData);
+        render(<StrategyLeaderboard />);
+
+        await waitFor(() => {
+          expect(screen.getByText("Fresh Strategy")).toBeInTheDocument();
+        });
+
+        expect(screen.getByText("Live")).toBeInTheDocument();
+      });
+
+      it("shows a Stale badge with a tooltip for stale strategy data", async () => {
+        mockFetchWith(freshnessMockData);
+        render(<StrategyLeaderboard />);
+
+        await waitFor(() => {
+          expect(screen.getByText("Stale Strategy")).toBeInTheDocument();
+        });
+
+        const staleBadge = screen.getByText("Stale");
+        expect(staleBadge).toBeInTheDocument();
+        const tooltipHost = staleBadge.closest("span[title]");
+        expect(tooltipHost).not.toBeNull();
+        expect(tooltipHost?.getAttribute("title")).toMatch(/may not reflect current market conditions/i);
+      });
+
+      it("shows a No Data badge with a tooltip for strategies with missing freshness data", async () => {
+        mockFetchWith(freshnessMockData);
+        render(<StrategyLeaderboard />);
+
+        await waitFor(() => {
+          expect(screen.getByText("Missing Freshness Strategy")).toBeInTheDocument();
+        });
+
+        const missingBadge = screen.getByText("No Data");
+        expect(missingBadge).toBeInTheDocument();
+        const tooltipHost = missingBadge.closest("span[title]");
+        expect(tooltipHost).not.toBeNull();
+        expect(tooltipHost?.getAttribute("title")).toMatch(/no freshness data available/i);
+      });
+    });
+
+    describe("Stale-row sorting rules", () => {
+      const rotationSortMockData = {
+        items: [
+          {
+            rank: 1,
+            id: "stale-high-apy",
+            name: "Stale High APY",
+            strategyType: "soroswap",
+            apy: 90,
+            tvlUsd: 100000,
+            riskScore: 9,
+            riskAdjustedYield: 9,
+            drawdownProxy: 0.02,
+            lastUpdatedAt: STALE_TIMESTAMP,
+          },
+          {
+            rank: 2,
+            id: "fresh-low-apy",
+            name: "Fresh Low APY",
+            strategyType: "blend",
+            apy: 5,
+            tvlUsd: 100000,
+            riskScore: 5,
+            riskAdjustedYield: 0.5,
+            drawdownProxy: 0.01,
+            lastUpdatedAt: FRESH_TIMESTAMP,
+          },
+        ],
+        filters: { timeWindow: "all", strategyType: "all" },
+        total: 2,
+        scoringMethodology: "RAY = APY / (1 + risk_penalty)",
+      };
+
+      function mockFetchWith(leaderboardData: unknown) {
+        (global.fetch as ReturnType<typeof vi.fn>).mockImplementation((url) => {
+          if (url.includes("/api/strategies/leaderboard")) {
+            return Promise.resolve({
+              ok: true,
+              json: async () => leaderboardData,
+            } as Response);
+          }
+          return Promise.resolve({
+            ok: true,
+            json: async () => mockRotationData,
+          } as Response);
+        });
+      }
+
+      function rowOrder(container: HTMLElement): string[] {
+        return Array.from(container.querySelectorAll("tbody tr")).map(
+          (row) => row.textContent ?? "",
+        );
+      }
+
+      it("keeps the fresh strategy above the stale strategy in the APY view despite its lower APY", async () => {
+        mockFetchWith(rotationSortMockData);
+        const { container } = render(<StrategyLeaderboard />);
+
+        await waitFor(() => {
+          expect(screen.getByText("Stale High APY")).toBeInTheDocument();
+        });
+
+        fireEvent.click(screen.getByRole("button", { name: "APY" }));
+
+        await waitFor(() => {
+          const order = rowOrder(container);
+          const freshIndex = order.findIndex((text) => text.includes("Fresh Low APY"));
+          const staleIndex = order.findIndex((text) => text.includes("Stale High APY"));
+          expect(freshIndex).toBeGreaterThanOrEqual(0);
+          expect(staleIndex).toBeGreaterThanOrEqual(0);
+          expect(freshIndex).toBeLessThan(staleIndex);
+        });
+      });
+
+      it("keeps the fresh strategy above the stale strategy in the Risk view despite its lower risk score", async () => {
+        mockFetchWith(rotationSortMockData);
+        const { container } = render(<StrategyLeaderboard />);
+
+        await waitFor(() => {
+          expect(screen.getByText("Stale High APY")).toBeInTheDocument();
+        });
+
+        fireEvent.click(screen.getByRole("button", { name: "Risk" }));
+
+        await waitFor(() => {
+          const order = rowOrder(container);
+          const freshIndex = order.findIndex((text) => text.includes("Fresh Low APY"));
+          const staleIndex = order.findIndex((text) => text.includes("Stale High APY"));
+          expect(freshIndex).toBeGreaterThanOrEqual(0);
+          expect(staleIndex).toBeGreaterThanOrEqual(0);
+          expect(freshIndex).toBeLessThan(staleIndex);
+        });
+      });
+
+      it("assigns #1 rank display to the top row after re-sorting by a new view", async () => {
+        mockFetchWith(rotationSortMockData);
+        render(<StrategyLeaderboard />);
+
+        await waitFor(() => {
+          expect(screen.getByText("Stale High APY")).toBeInTheDocument();
+        });
+
+        fireEvent.click(screen.getByRole("button", { name: "APY" }));
+
+        await waitFor(() => {
+          const freshRow = screen.getByText("Fresh Low APY").closest("tr");
+          expect(freshRow?.textContent).toMatch(/#1/);
+        });
       });
     });
   });
